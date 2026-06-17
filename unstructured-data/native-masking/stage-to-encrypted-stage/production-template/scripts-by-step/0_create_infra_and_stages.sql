@@ -1,0 +1,40 @@
+-- =============================================================================
+-- Step 0: Secret, Network Rule, External Access Integration, Stages
+-- =============================================================================
+-- PLACEHOLDERS:
+--   {{SECRET_DATABASE}}, {{SECRET_SCHEMA}}, {{SECRET_NAME}}, {{NULLAFI_API_KEY}}
+--   {{NETWORK_RULE_DB}}, {{NETWORK_RULE_SCHEMA}}, {{NETWORK_RULE_NAME}}
+--   {{NULLAFI_HOSTNAME}}, {{INTEGRATION_NAME}}
+--   {{LANDING_DATABASE}}, {{LANDING_SCHEMA}}, {{LANDING_STAGE}}
+--   {{ENCRYPTED_DATABASE}}, {{ENCRYPTED_SCHEMA}}, {{ENCRYPTED_STAGE}}
+-- =============================================================================
+
+USE ROLE SYSADMIN;
+
+CREATE OR REPLACE SECRET {{SECRET_DATABASE}}.{{SECRET_SCHEMA}}.{{SECRET_NAME}}
+  TYPE = GENERIC_STRING
+  SECRET_STRING = '{{NULLAFI_API_KEY}}';
+
+USE ROLE ACCOUNTADMIN;
+
+CREATE OR REPLACE NETWORK RULE {{NETWORK_RULE_DB}}.{{NETWORK_RULE_SCHEMA}}.{{NETWORK_RULE_NAME}}
+  MODE = EGRESS
+  TYPE = HOST_PORT
+  VALUE_LIST = ('{{NULLAFI_HOSTNAME}}');
+
+CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION {{INTEGRATION_NAME}}
+  ALLOWED_NETWORK_RULES = ({{NETWORK_RULE_DB}}.{{NETWORK_RULE_SCHEMA}}.{{NETWORK_RULE_NAME}})
+  ALLOWED_AUTHENTICATION_SECRETS = ({{SECRET_DATABASE}}.{{SECRET_SCHEMA}}.{{SECRET_NAME}})
+  ENABLED = TRUE;
+
+-- Stages MUST use server-side encryption (SNOWFLAKE_SSE). Client-side
+-- encryption breaks Cortex functions (PARSE_DOCUMENT) and AI consumption.
+CREATE STAGE IF NOT EXISTS {{LANDING_DATABASE}}.{{LANDING_SCHEMA}}.{{LANDING_STAGE}}
+  DIRECTORY = (ENABLE = TRUE)
+  ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')
+  COMMENT = 'Landing stage for raw files to be encrypted';
+
+CREATE STAGE IF NOT EXISTS {{ENCRYPTED_DATABASE}}.{{ENCRYPTED_SCHEMA}}.{{ENCRYPTED_STAGE}}
+  DIRECTORY = (ENABLE = TRUE)
+  ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')
+  COMMENT = 'Target stage for Nullafi-encrypted files';

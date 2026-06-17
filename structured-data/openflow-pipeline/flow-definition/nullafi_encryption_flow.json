@@ -1,0 +1,252 @@
+{
+  "flowContents": {
+    "identifier": "nullafi-encryption-pipeline",
+    "name": "Nullafi Encryption Pipeline",
+    "comments": "Reads new rows from a Snowflake stream, sends all fields to the Nullafi dynamic-scan API for encryption, and writes the encrypted results to the target table via Snowpipe Streaming.",
+    "position": { "x": 0, "y": 0 },
+    "processGroups": [],
+    "remoteProcessGroups": [],
+    "processors": [
+      {
+        "identifier": "consume-snowflake-stream",
+        "name": "Consume Snowflake Stream",
+        "type": "com.snowflake.openflow.processors.ConsumeSnowflakeStream",
+        "comments": "Polls the source table stream for new rows and emits each batch as a FlowFile.",
+        "position": { "x": 0, "y": 0 },
+        "properties": {
+          "Snowflake Connection Service": "#{snowflake-connection-service}",
+          "Stream Name": "#{source_stream_name}",
+          "Database": "#{source_database}",
+          "Schema": "#{source_schema}",
+          "Batch Size": "#{batch_size}",
+          "Record Writer": "#{json-record-writer}"
+        },
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "#{polling_interval}",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": []
+      },
+      {
+        "identifier": "batch-records",
+        "name": "Merge Records into Batches",
+        "type": "org.apache.nifi.processors.standard.MergeRecord",
+        "comments": "Merges individual records into batches of up to 100 for efficient API calls.",
+        "position": { "x": 0, "y": 200 },
+        "properties": {
+          "Record Reader": "#{json-record-reader}",
+          "Record Writer": "#{json-record-writer}",
+          "Merge Strategy": "Bin-Packing Algorithm",
+          "Minimum Number of Records": "1",
+          "Maximum Number of Records": "#{batch_size}",
+          "Max Bin Age": "10 sec",
+          "Minimum Bin Size": "0 B",
+          "Maximum Bin Size": "5 MB"
+        },
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": ["original", "failure"]
+      },
+      {
+        "identifier": "invoke-nullafi-api",
+        "name": "Call Nullafi Dynamic Scan API",
+        "type": "org.apache.nifi.processors.standard.InvokeHTTP",
+        "comments": "Sends the batch of records (as JSON array) to Nullafi's /api/scan-dynamic endpoint. The API detects and encrypts values matching the configured data types. Non-sensitive values pass through unchanged.",
+        "position": { "x": 0, "y": 400 },
+        "properties": {
+          "HTTP URL": "https://#{nullafi_hostname}/api/scan-dynamic?namespace=#{nullafi_namespace}&obfuscatedDataTypes=#{data_types}&maskFormats=#{mask_formats}&storeOriginalValues=true",
+          "HTTP Method": "POST",
+          "Content-Type": "application/json",
+          "Request Body": "${flowfile.content}",
+          "Authorization": "Bearer #{nullafi_api_key}",
+          "SSL Context Service": "#{ssl-context-service}",
+          "Connection Timeout": "30 sec",
+          "Read Timeout": "120 sec",
+          "Include Date Header": "false",
+          "Follow Redirects": "true",
+          "Response Body Attribute Name": "",
+          "Put Response Body In Attribute": "false",
+          "Penalize on \"No Retry\"": "false",
+          "Response FlowFile Naming Strategy": "RESPONSE_RANDOM"
+        },
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "concurrentlySchedulableTaskCount": "#{concurrent_api_calls}",
+        "autoTerminatedRelationships": ["Original", "No Retry", "Failure"]
+      },
+      {
+        "identifier": "write-to-snowflake",
+        "name": "Write Encrypted Records to Snowflake",
+        "type": "com.snowflake.openflow.processors.PutSnowpipeStreaming",
+        "comments": "Writes the encrypted records to the target table using Snowpipe Streaming for low-latency ingestion.",
+        "position": { "x": 0, "y": 600 },
+        "properties": {
+          "Snowflake Connection Service": "#{snowflake-connection-service}",
+          "Database": "#{target_database}",
+          "Schema": "#{target_schema}",
+          "Table": "#{target_table}",
+          "Record Reader": "#{json-record-reader}",
+          "On Error": "ROUTE_TO_FAILURE"
+        },
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": ["success"]
+      },
+      {
+        "identifier": "log-failures",
+        "name": "Log Failed Records",
+        "type": "org.apache.nifi.processors.standard.LogAttribute",
+        "comments": "Logs any records that failed to be processed for debugging.",
+        "position": { "x": 400, "y": 600 },
+        "properties": {
+          "Log Level": "error",
+          "Log Payload": "true",
+          "Attributes to Log": "",
+          "Attributes to Ignore": "",
+          "Log prefix": "NULLAFI_PIPELINE_FAILURE"
+        },
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": ["success"]
+      }
+    ],
+    "connections": [
+      {
+        "identifier": "conn-stream-to-batch",
+        "name": "Stream to Batch",
+        "source": { "id": "consume-snowflake-stream", "type": "PROCESSOR" },
+        "destination": { "id": "batch-records", "type": "PROCESSOR" },
+        "selectedRelationships": ["success"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "0 sec"
+      },
+      {
+        "identifier": "conn-batch-to-api",
+        "name": "Batch to Nullafi API",
+        "source": { "id": "batch-records", "type": "PROCESSOR" },
+        "destination": { "id": "invoke-nullafi-api", "type": "PROCESSOR" },
+        "selectedRelationships": ["merged"],
+        "backPressureObjectThreshold": 1000,
+        "backPressureDataSizeThreshold": "50 MB",
+        "flowFileExpiration": "0 sec"
+      },
+      {
+        "identifier": "conn-api-to-snowflake",
+        "name": "API Response to Snowflake",
+        "source": { "id": "invoke-nullafi-api", "type": "PROCESSOR" },
+        "destination": { "id": "write-to-snowflake", "type": "PROCESSOR" },
+        "selectedRelationships": ["Response"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "0 sec"
+      },
+      {
+        "identifier": "conn-api-retry",
+        "name": "API Retry",
+        "source": { "id": "invoke-nullafi-api", "type": "PROCESSOR" },
+        "destination": { "id": "invoke-nullafi-api", "type": "PROCESSOR" },
+        "selectedRelationships": ["Retry"],
+        "backPressureObjectThreshold": 100,
+        "backPressureDataSizeThreshold": "10 MB",
+        "flowFileExpiration": "5 min"
+      },
+      {
+        "identifier": "conn-snowflake-failure",
+        "name": "Snowflake Write Failures",
+        "source": { "id": "write-to-snowflake", "type": "PROCESSOR" },
+        "destination": { "id": "log-failures", "type": "PROCESSOR" },
+        "selectedRelationships": ["failure"],
+        "backPressureObjectThreshold": 1000,
+        "backPressureDataSizeThreshold": "10 MB",
+        "flowFileExpiration": "0 sec"
+      }
+    ],
+    "controllerServices": [
+      {
+        "identifier": "json-record-reader",
+        "name": "JSON Record Reader",
+        "type": "org.apache.nifi.json.JsonTreeReader",
+        "properties": {
+          "Schema Access Strategy": "Infer Schema"
+        }
+      },
+      {
+        "identifier": "json-record-writer",
+        "name": "JSON Record Writer",
+        "type": "org.apache.nifi.json.JsonRecordSetWriter",
+        "properties": {
+          "Schema Access Strategy": "Inherit Record Schema",
+          "output-grouping": "output-array",
+          "Pretty Print JSON": "false"
+        }
+      },
+      {
+        "identifier": "ssl-context-service",
+        "name": "SSL Context Service",
+        "type": "org.apache.nifi.ssl.StandardRestrictedSSLContextService",
+        "comments": "Configure if Nullafi uses a custom CA or self-signed cert. Leave TrustStore empty to use system defaults.",
+        "properties": {
+          "Truststore Type": "PKCS12",
+          "Truststore Filename": "",
+          "Truststore Password": "",
+          "TLS Protocol": "TLS 1.2"
+        }
+      },
+      {
+        "identifier": "snowflake-connection-service",
+        "name": "Snowflake Connection Service",
+        "type": "com.snowflake.openflow.controllers.SnowflakeConnectionService",
+        "comments": "Connection to Snowflake using managed token auth (Snowflake Deployment) or key-pair (BYOC).",
+        "properties": {
+          "Authentication Strategy": "#{snowflake_auth_strategy}",
+          "Snowflake Account Identifier": "#{snowflake_account}",
+          "Snowflake Username": "#{snowflake_username}",
+          "Snowflake Role": "#{snowflake_role}",
+          "Snowflake Warehouse": "#{snowflake_warehouse}",
+          "Snowflake Private Key": "#{snowflake_private_key}"
+        }
+      }
+    ],
+    "parameterContexts": [
+      {
+        "identifier": "nullafi-pipeline-params",
+        "name": "Nullafi Encryption Pipeline Parameters",
+        "parameters": [
+          { "name": "source_database", "description": "Source database name", "value": "POS" },
+          { "name": "source_schema", "description": "Source schema name", "value": "PUBLIC" },
+          { "name": "source_stream_name", "description": "Name of the Snowflake stream to consume", "value": "USERS_ARGENTINA_STREAM" },
+          { "name": "target_database", "description": "Target (encrypted) database name", "value": "POS" },
+          { "name": "target_schema", "description": "Target schema name", "value": "PUBLIC" },
+          { "name": "target_table", "description": "Target table name", "value": "USERS_ARGENTINA_ENCRYPTED" },
+          { "name": "nullafi_hostname", "description": "Nullafi API hostname", "value": "test2.broknus.com" },
+          { "name": "nullafi_namespace", "description": "Namespace for Nullafi activity logging", "value": "snowflake_migration" },
+          { "name": "nullafi_api_key", "description": "Nullafi API key (sensitive)", "sensitive": true, "value": "" },
+          { "name": "data_types", "description": "Comma-separated Nullafi data type identifiers to detect", "value": "CREDIT_CARD,US_SSN,IBAN,EMAIL_ADDRESS" },
+          { "name": "mask_formats", "description": "Comma-separated mask format IDs (one per data type)", "value": "CYPHER,CYPHER,CYPHER,CYPHER" },
+          { "name": "batch_size", "description": "Maximum records per API call", "value": "100" },
+          { "name": "polling_interval", "description": "How often to poll the stream for new data", "value": "30 sec" },
+          { "name": "concurrent_api_calls", "description": "Number of parallel API calls allowed", "value": "2" },
+          { "name": "snowflake_auth_strategy", "description": "SNOWFLAKE_MANAGED_TOKEN or KEY_PAIR", "value": "SNOWFLAKE_MANAGED_TOKEN" },
+          { "name": "snowflake_account", "description": "Snowflake account identifier (org-name-account-name)", "value": "" },
+          { "name": "snowflake_username", "description": "Snowflake service user (leave blank for managed token)", "value": "" },
+          { "name": "snowflake_role", "description": "Snowflake role for the pipeline", "value": "OPENFLOW_ROLE" },
+          { "name": "snowflake_warehouse", "description": "Warehouse for Snowflake operations", "value": "COMPUTE_WH" },
+          { "name": "snowflake_private_key", "description": "RSA private key for key-pair auth (sensitive)", "sensitive": true, "value": "" }
+        ]
+      }
+    ]
+  },
+  "snapshotMetadata": {
+    "bucketIdentifier": "nullafi-encryption",
+    "flowIdentifier": "nullafi-encryption-pipeline",
+    "version": 1,
+    "comments": "Initial version - Nullafi encryption pipeline for Snowflake table-to-table migration with API-based tokenization."
+  }
+}

@@ -1,0 +1,35 @@
+-- =============================================================================
+-- Step 2: Stream + task for incremental loading; backfill + verify
+-- =============================================================================
+-- PLACEHOLDERS: {{STREAM_*}}, {{LANDING_*}}, {{TASK_*}}, {{WAREHOUSE}},
+--   {{SCHEDULE}}, {{PROCEDURE_*}}, {{TABLE_DATABASE}}, {{TABLE_SCHEMA}}, {{TARGET_TABLE}}
+
+CREATE OR REPLACE STREAM {{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.{{STREAM_NAME}}
+  ON STAGE {{LANDING_DATABASE}}.{{LANDING_SCHEMA}}.{{LANDING_STAGE}};
+
+CREATE OR REPLACE TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.{{TASK_NAME}}
+  WAREHOUSE = {{WAREHOUSE}}
+  SCHEDULE = '{{SCHEDULE}}'
+  WHEN SYSTEM$STREAM_HAS_DATA('{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.{{STREAM_NAME}}')
+AS
+  CALL {{PROCEDURE_DATABASE}}.{{PROCEDURE_SCHEMA}}.{{PROCEDURE_NAME}}(
+    'incremental',
+    '{{LANDING_DATABASE}}.{{LANDING_SCHEMA}}.{{LANDING_STAGE}}',
+    '{{TABLE_DATABASE}}.{{TABLE_SCHEMA}}.{{TARGET_TABLE}}',
+    '{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.{{STREAM_NAME}}'
+  );
+
+ALTER TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.{{TASK_NAME}} RESUME;
+
+-- Backfill any files already in the stage
+CALL {{PROCEDURE_DATABASE}}.{{PROCEDURE_SCHEMA}}.{{PROCEDURE_NAME}}(
+  'all',
+  '{{LANDING_DATABASE}}.{{LANDING_SCHEMA}}.{{LANDING_STAGE}}',
+  '{{TABLE_DATABASE}}.{{TABLE_SCHEMA}}.{{TARGET_TABLE}}',
+  ''
+);
+
+-- Verify
+SELECT FILE_NAME, FILE_FORMAT,
+       CASE WHEN MASKED_CONTENT ILIKE '%NFA_%' THEN 'YES' ELSE 'NO' END AS HAS_NFA_TOKENS
+FROM {{TABLE_DATABASE}}.{{TABLE_SCHEMA}}.{{TARGET_TABLE}};

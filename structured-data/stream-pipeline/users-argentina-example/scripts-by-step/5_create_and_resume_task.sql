@@ -1,0 +1,11 @@
+-- Step 5: Create a task that runs the procedure when the stream has new data
+-- The task checks every 1 minute. Replace COMPUTE_WH with your warehouse if different.
+
+CREATE OR REPLACE TASK POS.PUBLIC.ENCRYPT_USERS_ARGENTINA_TASK
+  WAREHOUSE = COMPUTE_WH
+  SCHEDULE = '1 MINUTE'
+  WHEN SYSTEM$STREAM_HAS_DATA('POS.PUBLIC.USERS_ARGENTINA_STREAM')
+AS
+  CALL POS.PUBLIC.ENCRYPT_AND_INSERT_USERS_ARGENTINA('incremental');
+
+ALTER TASK POS.PUBLIC.ENCRYPT_USERS_ARGENTINA_TASK RESUME;

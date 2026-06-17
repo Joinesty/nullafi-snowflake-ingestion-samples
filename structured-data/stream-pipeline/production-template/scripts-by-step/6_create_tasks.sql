@@ -1,0 +1,102 @@
+-- =============================================================================
+-- Step 6: Create and Resume Tasks for Each Table
+-- =============================================================================
+-- Creates one task per table that fires when the corresponding stream has data.
+-- Tasks must be created in dependency order and should process parent tables
+-- before child tables to maintain referential integrity.
+--
+-- STRATEGY FOR FK ORDERING:
+--   Option A (simple): Use a single parent task with child tasks chained via
+--                      AFTER clause. Parent tables process first.
+--   Option B (parallel): Independent tasks per table if FK constraints are
+--                        not enforced or data arrives in order.
+--
+-- This template uses Option A (chained tasks) for FK safety.
+--
+-- PLACEHOLDERS:
+--   {{TASK_DATABASE}}        - Database for tasks
+--   {{TASK_SCHEMA}}          - Schema for tasks
+--   {{WAREHOUSE}}            - Warehouse to use for task execution
+--   {{SCHEDULE}}             - Schedule interval (e.g., '1 MINUTE', '5 MINUTE')
+--   {{PROCEDURE_DATABASE}}   - Database where the procedure lives
+--   {{PROCEDURE_SCHEMA}}     - Schema where the procedure lives
+--   {{PROCEDURE_NAME}}       - Name of the encryption procedure
+--   {{SOURCE_DATABASE}}      - Source database name
+--   {{SOURCE_SCHEMA}}        - Source schema name
+--   {{TARGET_DATABASE}}      - Target database name
+--   {{TARGET_SCHEMA}}        - Target schema name
+--   {{STREAM_DATABASE}}      - Database where streams live
+--   {{STREAM_SCHEMA}}        - Schema where streams live
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- ROOT TASK: Scheduled trigger (processes TIER 1 parent tables)
+-- This is the only task with a SCHEDULE. All others chain off it.
+-- -----------------------------------------------------------------------------
+
+-- CREATE OR REPLACE TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_DEPARTMENTS_TASK
+--   WAREHOUSE = {{WAREHOUSE}}
+--   SCHEDULE = '{{SCHEDULE}}'
+--   WHEN SYSTEM$STREAM_HAS_DATA('{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.DEPARTMENTS_STREAM')
+-- AS
+--   CALL {{PROCEDURE_DATABASE}}.{{PROCEDURE_SCHEMA}}.{{PROCEDURE_NAME}}(
+--     'incremental',
+--     '{{SOURCE_DATABASE}}.{{SOURCE_SCHEMA}}.DEPARTMENTS',
+--     '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.DEPARTMENTS',
+--     '{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.DEPARTMENTS_STREAM'
+--   );
+
+-- CREATE OR REPLACE TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_COUNTRIES_TASK
+--   WAREHOUSE = {{WAREHOUSE}}
+--   SCHEDULE = '{{SCHEDULE}}'
+--   WHEN SYSTEM$STREAM_HAS_DATA('{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.COUNTRIES_STREAM')
+-- AS
+--   CALL {{PROCEDURE_DATABASE}}.{{PROCEDURE_SCHEMA}}.{{PROCEDURE_NAME}}(
+--     'incremental',
+--     '{{SOURCE_DATABASE}}.{{SOURCE_SCHEMA}}.COUNTRIES',
+--     '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.COUNTRIES',
+--     '{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.COUNTRIES_STREAM'
+--   );
+
+-- -----------------------------------------------------------------------------
+-- TIER 2 TASKS: Chained after parent tasks using AFTER clause
+-- These only run after the parent task completes successfully.
+-- -----------------------------------------------------------------------------
+
+-- CREATE OR REPLACE TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_EMPLOYEES_TASK
+--   WAREHOUSE = {{WAREHOUSE}}
+--   AFTER {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_DEPARTMENTS_TASK,
+--         {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_COUNTRIES_TASK
+--   WHEN SYSTEM$STREAM_HAS_DATA('{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.EMPLOYEES_STREAM')
+-- AS
+--   CALL {{PROCEDURE_DATABASE}}.{{PROCEDURE_SCHEMA}}.{{PROCEDURE_NAME}}(
+--     'incremental',
+--     '{{SOURCE_DATABASE}}.{{SOURCE_SCHEMA}}.EMPLOYEES',
+--     '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.EMPLOYEES',
+--     '{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.EMPLOYEES_STREAM'
+--   );
+
+-- -----------------------------------------------------------------------------
+-- TIER 3 TASKS: Chained after TIER 2
+-- -----------------------------------------------------------------------------
+
+-- CREATE OR REPLACE TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_ORDERS_TASK
+--   WAREHOUSE = {{WAREHOUSE}}
+--   AFTER {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_EMPLOYEES_TASK
+--   WHEN SYSTEM$STREAM_HAS_DATA('{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.ORDERS_STREAM')
+-- AS
+--   CALL {{PROCEDURE_DATABASE}}.{{PROCEDURE_SCHEMA}}.{{PROCEDURE_NAME}}(
+--     'incremental',
+--     '{{SOURCE_DATABASE}}.{{SOURCE_SCHEMA}}.ORDERS',
+--     '{{TARGET_DATABASE}}.{{TARGET_SCHEMA}}.ORDERS',
+--     '{{STREAM_DATABASE}}.{{STREAM_SCHEMA}}.ORDERS_STREAM'
+--   );
+
+-- -----------------------------------------------------------------------------
+-- RESUME ALL TASKS (leaf tasks first, then parents — Snowflake requirement)
+-- -----------------------------------------------------------------------------
+
+-- ALTER TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_ORDERS_TASK RESUME;
+-- ALTER TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_EMPLOYEES_TASK RESUME;
+-- ALTER TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_COUNTRIES_TASK RESUME;
+-- ALTER TASK {{TASK_DATABASE}}.{{TASK_SCHEMA}}.ENCRYPT_DEPARTMENTS_TASK RESUME;
